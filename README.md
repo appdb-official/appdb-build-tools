@@ -20,7 +20,7 @@ It should look like this (for example):
 
 ```./build.sh /Users/apppdb/Downloads/testappdb/TestAppdb.xcodeproj```
 
-3. Follow instructions. Resulted IPA will be in dist/ folder of your project.
+3. Follow instructions. Resulted IPA will be in ```dist/``` folder of your project.
 4. This IPA then can be uploaded to [IPA Packages area](https://publisher.appdb.to/apps/binary-packages) or distributed elsewhere.
 
 ## Using Hardware Security Modules and hardware keys
@@ -31,9 +31,9 @@ interface to sign IPA packages with Hardware Security Modules or Keys. You can b
 This functionality has been tested with:
 
 1. [FIPS 140-2 validated security keys from Yubico](https://www.yubico.com/products/yubikey-fips/).
-2. [FIPS 140-2 validated HSM](https://resources.yubico.com/53ZDUYE6/at/q4bsft-z2wi8-fo7aqg/YubiHSM2_Product_Brief.pdf?format=pdf)
+2. [FIPS 140-2 validated HSM](https://www.yubico.com/products/hardware-security-module/).
 
-**Usage of such Hardware Encryption brings the highest level of security to the apps.**
+**Usage of such Hardware Encryption brings the highest level of security and trust between developer and end user without any intermediates.**
 
 # How can you contribute
 

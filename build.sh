@@ -2,7 +2,9 @@
 # Installation
 echo "Building IPA"
 export OPENSSL_CONF=~/.appdb/engine.conf
-LDID=./ldid
+SOURCE_DIR=$(dirname "$0")
+LDID="$SOURCE_DIR/ldid"
+P12="$SOURCE_DIR/dummy.p12"
 PLISTBUDDY=/usr/libexec/PlistBuddy
 
 ASK_FOR_HSM=1
@@ -172,11 +174,11 @@ for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
   $LDID -S "$file"
   echo "signing dylib $file"
 
-  if [[ $USE_HSM ]]; then
+  if [[ $USE_HSM == 1 ]]; then
 
     $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
   else
-    $LDID -w -S -M "$file"
+    $LDID -w -K"$P12" -S -M "$file"
   fi
 done
 
@@ -194,11 +196,11 @@ for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
   $LDID -S "$file/$FRAMEWORK_APP_BINARY"
   echo "signing"
 
-  if [[ $USE_HSM ]]; then
+  if [[ $USE_HSM == 1 ]]; then
 
     $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
   else
-    $LDID -w -S -M "$file"
+    $LDID -w -K"$P12" -S -M "$file"
   fi
 done
 
@@ -210,19 +212,19 @@ done < <(find "$APP_PATH" -name "*.app" -or -name "*.appex" -print0)
 
 for file in "${APP_EXTENSIONS[@]}"; do
   echo "signing app extension $file"
-  if [[ $USE_HSM ]]; then
+  if [[ $USE_HSM == 1 ]]; then
 
     $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
   else
-    $LDID -w -S -M "$file"
+    $LDID -w -K"$P12" -S -M "$file"
   fi
 done
 
-if [[ $USE_HSM ]]; then
+if [[ $USE_HSM == 1 ]]; then
 
   $LDID -w -S"$BUILD_ROOT_PATH/bundledEntitlements" -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$APP_PATH/$APP_BINARY"
 else
-  $LDID -w -S"$BUILD_ROOT_PATH/bundledEntitlements" -M "$file"
+  $LDID -w -K"$P12" -S"$BUILD_ROOT_PATH/bundledEntitlements" -M "$APP_PATH/$APP_BINARY"
 fi
 
 echo "Resulted entitlements:"
@@ -244,6 +246,7 @@ zip -3 -qr "../result.ipa" ./*
 cd "$BUILD_ROOT_PATH/dist"
 rm -Rf "$BUILD_ROOT_PATH/dist/ditto"
 rm -f "$BUILD_ROOT_PATH/emptyEntitlements"
+rm -f "$BUILD_ROOT_PATH/bundledEntitlements"
 
 echo "Packaging completed. $BUILD_ROOT_PATH/dist/result.ipa"
 
