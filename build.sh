@@ -127,6 +127,126 @@ SCHEMES=($(echo "$PROJECT_INFO" | sed -n '/Schemes:/,/^$/p' | grep -v "Schemes:"
 # Extract build configurations  
 BUILD_CONFIGS=($(echo "$PROJECT_INFO" | sed -n '/Build Configurations:/,/^$/p' | grep -v "Build Configurations:" | grep -v "^$" | sed 's/^[[:space:]]*//' | grep -v "^[[:space:]]*$"))
 
+# Function to get bundle identifier from Xcode project settings (not cached build output)
+# This ensures we always get the latest bundle identifier from the project configuration
+# instead of relying on potentially stale build output in derivedData or Info.plist
+get_bundle_identifier_from_project() {
+  local project_file="$1"
+  local scheme="$2"
+  local configuration="$3"
+  
+  # Get build settings from the project directly
+  local build_settings
+  local bundle_id=""
+  
+  echo -e "${CYAN}🔧 Extracting build settings from project...${RESET}" >&2
+  
+  if [[ "$project_file" == *.xcodeworkspace ]]; then
+    build_settings=$(xcodebuild -workspace "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
+  else
+    build_settings=$(xcodebuild -project "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
+  fi
+  
+  if [[ $? -eq 0 && -n "$build_settings" ]]; then
+    # Extract PRODUCT_BUNDLE_IDENTIFIER from build settings
+    bundle_id=$(echo "$build_settings" | grep "PRODUCT_BUNDLE_IDENTIFIER" | head -n 1 | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | tr -d ' ')
+    
+    # Clean up the bundle identifier (remove quotes if present)
+    bundle_id=$(echo "$bundle_id" | tr -d '"' | tr -d "'")
+  fi
+  
+  # If we couldn't get it from build settings, try direct project file parsing
+  if [[ -z "$bundle_id" ]]; then
+    echo -e "${CYAN}🔧 Trying to extract from project file directly...${RESET}" >&2
+    
+    if [[ "$project_file" == *.xcodeworkspace ]]; then
+      # For workspace, look for .xcodeproj files in the same directory
+      local workspace_dir=$(dirname "$project_file")
+      local xcodeproj_file=$(find "$workspace_dir" -name "*.xcodeproj" | head -n 1)
+      
+      if [[ -n "$xcodeproj_file" ]]; then
+        local pbxproj_file="$xcodeproj_file/project.pbxproj"
+        if [[ -f "$pbxproj_file" ]]; then
+          bundle_id=$(grep -m1 "PRODUCT_BUNDLE_IDENTIFIER" "$pbxproj_file" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | sed 's/;//' | tr -d ' "')
+        fi
+      fi
+    else
+      local pbxproj_file="$project_file/project.pbxproj"
+      if [[ -f "$pbxproj_file" ]]; then
+        bundle_id=$(grep -m1 "PRODUCT_BUNDLE_IDENTIFIER" "$pbxproj_file" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | sed 's/;//' | tr -d ' "')
+      fi
+    fi
+  fi
+  
+  echo "$bundle_id"
+}
+
+# Function to get bundle version from Xcode project settings (not cached build output)
+# This ensures we always get the latest version numbers from the project configuration
+# instead of relying on potentially stale build output in derivedData or Info.plist
+get_bundle_version_from_project() {
+  local project_file="$1"
+  local scheme="$2"
+  local configuration="$3"
+  
+  # Get build settings from the project directly
+  local build_settings
+  local marketing_version=""
+  local current_project_version=""
+  
+  echo -e "${CYAN}🔧 Extracting version info from project...${RESET}" >&2
+  
+  if [[ "$project_file" == *.xcodeworkspace ]]; then
+    build_settings=$(xcodebuild -workspace "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
+  else
+    build_settings=$(xcodebuild -project "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
+  fi
+  
+  if [[ $? -eq 0 && -n "$build_settings" ]]; then
+    # Extract MARKETING_VERSION (CFBundleShortVersionString) from build settings
+    marketing_version=$(echo "$build_settings" | grep "MARKETING_VERSION" | head -n 1 | sed 's/.*MARKETING_VERSION = //' | tr -d ' ' | tr -d '"' | tr -d "'")
+    
+    # Extract CURRENT_PROJECT_VERSION (CFBundleVersion) from build settings
+    current_project_version=$(echo "$build_settings" | grep "CURRENT_PROJECT_VERSION" | head -n 1 | sed 's/.*CURRENT_PROJECT_VERSION = //' | tr -d ' ' | tr -d '"' | tr -d "'")
+  fi
+  
+  # If we couldn't get them from build settings, try direct project file parsing
+  if [[ -z "$marketing_version" || -z "$current_project_version" ]]; then
+    echo -e "${CYAN}🔧 Trying to extract version info from project file directly...${RESET}" >&2
+    
+    if [[ "$project_file" == *.xcodeworkspace ]]; then
+      # For workspace, look for .xcodeproj files in the same directory
+      local workspace_dir=$(dirname "$project_file")
+      local xcodeproj_file=$(find "$workspace_dir" -name "*.xcodeproj" | head -n 1)
+      
+      if [[ -n "$xcodeproj_file" ]]; then
+        local pbxproj_file="$xcodeproj_file/project.pbxproj"
+        if [[ -f "$pbxproj_file" ]]; then
+          if [[ -z "$marketing_version" ]]; then
+            marketing_version=$(grep -m1 "MARKETING_VERSION" "$pbxproj_file" | sed 's/.*MARKETING_VERSION = //' | sed 's/;//' | tr -d ' "')
+          fi
+          if [[ -z "$current_project_version" ]]; then
+            current_project_version=$(grep -m1 "CURRENT_PROJECT_VERSION" "$pbxproj_file" | sed 's/.*CURRENT_PROJECT_VERSION = //' | sed 's/;//' | tr -d ' "')
+          fi
+        fi
+      fi
+    else
+      local pbxproj_file="$project_file/project.pbxproj"
+      if [[ -f "$pbxproj_file" ]]; then
+        if [[ -z "$marketing_version" ]]; then
+          marketing_version=$(grep -m1 "MARKETING_VERSION" "$pbxproj_file" | sed 's/.*MARKETING_VERSION = //' | sed 's/;//' | tr -d ' "')
+        fi
+        if [[ -z "$current_project_version" ]]; then
+          current_project_version=$(grep -m1 "CURRENT_PROJECT_VERSION" "$pbxproj_file" | sed 's/.*CURRENT_PROJECT_VERSION = //' | sed 's/;//' | tr -d ' "')
+        fi
+      fi
+    fi
+  fi
+  
+  # Return both values separated by a pipe character
+  echo "${marketing_version}|${current_project_version}"
+}
+
 # Select scheme if not provided as argument
 if [[ "$XCODE_BUILD_SCHEME" == "" ]]; then
   if [ ${#SCHEMES[@]} -eq 0 ]; then
@@ -157,6 +277,45 @@ fi
 
 echo -e "${GREEN}✅ Selected build scheme: ${BOLD}$XCODE_BUILD_SCHEME${RESET}"
 echo -e "${GREEN}✅ Selected build configuration: ${BOLD}$XCODE_BUILD_CONFIGURATION${RESET}"
+
+echo -e "${BOLD}${YELLOW}🔍 Getting bundle identifier from project settings${RESET}"
+CURRENT_BUNDLE_IDENTIFIER=$(get_bundle_identifier_from_project "$XCODE_PROJECT_FILE" "$XCODE_BUILD_SCHEME" "$XCODE_BUILD_CONFIGURATION")
+
+if [[ -z "$CURRENT_BUNDLE_IDENTIFIER" ]]; then
+  echo -e "${YELLOW}⚠️  Could not extract bundle identifier from project settings${RESET}"
+  CURRENT_BUNDLE_IDENTIFIER="(will be read from built Info.plist)"
+else
+  echo -e "${GREEN}✅ Bundle identifier from project settings: ${BOLD}$CURRENT_BUNDLE_IDENTIFIER${RESET}"
+fi
+
+echo -e "${BOLD}${YELLOW}🔢 Getting bundle version from project settings${RESET}"
+BUNDLE_VERSION_INFO=$(get_bundle_version_from_project "$XCODE_PROJECT_FILE" "$XCODE_BUILD_SCHEME" "$XCODE_BUILD_CONFIGURATION")
+
+# Parse the version info
+IFS='|' read -r PROJECT_MARKETING_VERSION PROJECT_CURRENT_VERSION <<< "$BUNDLE_VERSION_INFO"
+
+echo -e "${BLUE}📋 Project version information:${RESET}"
+echo -e "${CYAN}  Bundle Identifier: ${BOLD}${CURRENT_BUNDLE_IDENTIFIER}${RESET}"
+echo -e "${CYAN}  CFBundleShortVersionString (MARKETING_VERSION): ${BOLD}${PROJECT_MARKETING_VERSION:-'not set in project'}${RESET}"
+echo -e "${CYAN}  CFBundleVersion (CURRENT_PROJECT_VERSION): ${BOLD}${PROJECT_CURRENT_VERSION:-'not set in project'}${RESET}"
+
+while true; do
+  echo -e "${MAGENTA}🤔 Do you want to proceed with building using these settings? [y/n]${RESET}"
+  read -r yn
+  case $yn in
+    [Yy]*)
+      echo -e "${GREEN}✅ Proceeding with build...${RESET}"
+      break
+      ;;
+    [Nn]*)
+      echo -e "${YELLOW}❌ Build cancelled. Please update your project settings and try again.${RESET}"
+      exit 0
+      ;;
+    *)
+      echo -e "${RED}Please answer yes or no.${RESET}"
+      ;;
+  esac
+done
 
 echo -e "${BOLD}${MAGENTA}🏗️  Building...${RESET}"
 
@@ -226,7 +385,56 @@ fi
 
 $PLISTBUDDY -c "Add :com.apple.developer.team-identifier string APPDBAPPDB" "$BUILD_ROOT_PATH/bundledEntitlements"
 
-CURRENT_BUNDLE_IDENTIFIER=$($PLISTBUDDY -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist" | tr -d '"')
+# Handle bundle identifier - use project settings if available, otherwise fallback to built Info.plist
+if [[ "$CURRENT_BUNDLE_IDENTIFIER" == "(will be read from built Info.plist)" ]]; then
+  echo -e "${YELLOW}🔍 Reading bundle identifier from built Info.plist${RESET}"
+  CURRENT_BUNDLE_IDENTIFIER=$($PLISTBUDDY -c "Print :CFBundleIdentifier" "$APP_PATH/Info.plist" | tr -d '"')
+  
+  if [[ -z "$CURRENT_BUNDLE_IDENTIFIER" ]]; then
+    echo -e "${RED}❌ ERROR: Could not determine bundle identifier from project or built app${RESET}" >&2
+    exit 1
+  fi
+  echo -e "${BLUE}📱 Bundle identifier from built Info.plist: ${BOLD}$CURRENT_BUNDLE_IDENTIFIER${RESET}"
+fi
+
+# Update Info.plist with project version settings if they were found
+if [[ -n "$PROJECT_MARKETING_VERSION" || -n "$PROJECT_CURRENT_VERSION" ]]; then
+  echo -e "${BOLD}${YELLOW}🔄 Updating Info.plist with project version settings${RESET}"
+  
+  # Get current versions from built Info.plist for comparison
+  BUILT_MARKETING_VERSION=$($PLISTBUDDY -c "Print :CFBundleShortVersionString" "$APP_PATH/Info.plist" 2>/dev/null | tr -d '"' || echo "")
+  BUILT_CURRENT_VERSION=$($PLISTBUDDY -c "Print :CFBundleVersion" "$APP_PATH/Info.plist" 2>/dev/null | tr -d '"' || echo "")
+  
+  VERSIONS_UPDATED=false
+  
+  if [[ -n "$PROJECT_MARKETING_VERSION" && "$PROJECT_MARKETING_VERSION" != "$BUILT_MARKETING_VERSION" ]]; then
+    echo -e "${CYAN}🔄 Updating CFBundleShortVersionString from ${BUILT_MARKETING_VERSION:-'unset'} to ${PROJECT_MARKETING_VERSION}${RESET}"
+    if [[ -n "$BUILT_MARKETING_VERSION" ]]; then
+      $PLISTBUDDY -c "Set :CFBundleShortVersionString $PROJECT_MARKETING_VERSION" "$APP_PATH/Info.plist"
+    else
+      $PLISTBUDDY -c "Add :CFBundleShortVersionString string $PROJECT_MARKETING_VERSION" "$APP_PATH/Info.plist"
+    fi
+    VERSIONS_UPDATED=true
+  fi
+  
+  if [[ -n "$PROJECT_CURRENT_VERSION" && "$PROJECT_CURRENT_VERSION" != "$BUILT_CURRENT_VERSION" ]]; then
+    echo -e "${CYAN}🔄 Updating CFBundleVersion from ${BUILT_CURRENT_VERSION:-'unset'} to ${PROJECT_CURRENT_VERSION}${RESET}"
+    if [[ -n "$BUILT_CURRENT_VERSION" ]]; then
+      $PLISTBUDDY -c "Set :CFBundleVersion $PROJECT_CURRENT_VERSION" "$APP_PATH/Info.plist"
+    else
+      $PLISTBUDDY -c "Add :CFBundleVersion string $PROJECT_CURRENT_VERSION" "$APP_PATH/Info.plist"
+    fi
+    VERSIONS_UPDATED=true
+  fi
+  
+  if [[ "$VERSIONS_UPDATED" == "true" ]]; then
+    echo -e "${GREEN}✅ Info.plist updated with latest project version settings${RESET}"
+  else
+    echo -e "${GREEN}✅ Bundle versions already match project settings${RESET}"
+  fi
+else
+  echo -e "${BLUE}ℹ️  No version information found in project settings, keeping built Info.plist values${RESET}"
+fi
 
 $PLISTBUDDY -c "Add :application-identifier string APPDBAPPDB.$CURRENT_BUNDLE_IDENTIFIER" "$BUILD_ROOT_PATH/bundledEntitlements"
 
