@@ -497,6 +497,31 @@ for file in "${APP_EXTENSIONS[@]}"; do
   fi
 done
 
+# Find and sign additional executable binaries in main app folder (one level deep)
+ADDITIONAL_EXECUTABLES=()
+while IFS= read -r -d $'\0'; do
+  # Get the basename of the file to compare with APP_BINARY
+  BASENAME_FILE=$(basename "$REPLY")
+  # Skip if it's the main app binary (will be signed separately)
+  if [[ "$BASENAME_FILE" != "$APP_BINARY" ]]; then
+    ADDITIONAL_EXECUTABLES+=("$REPLY")
+  fi
+done < <(find "$APP_PATH" -maxdepth 1 -type f -perm +111 -print0 2>/dev/null)
+
+for file in "${ADDITIONAL_EXECUTABLES[@]}"; do
+  echo -e "${CYAN}⚙️  Signing additional executable: ${BOLD}$file${RESET}"
+  
+  echo -e "${CYAN}🔧 Removing entitlements from executable${RESET}"
+  $LDID -S "$file"
+  echo -e "${CYAN}✍️  Signing executable${RESET}"
+
+  if [[ $USE_HSM == 1 ]]; then
+    $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
+  else
+    $LDID -w -K"$P12" -S -M "$file"
+  fi
+done
+
 if [[ $USE_HSM == 1 ]]; then
 
   $LDID -w -S"$BUILD_ROOT_PATH/bundledEntitlements" -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$APP_PATH/$APP_BINARY"
