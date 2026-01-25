@@ -466,6 +466,14 @@ while IFS= read -r -d $'\0'; do
 done < <(find "$APP_PATH" -name "*.framework" -print0)
 
 for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
+  # Check if this framework is nested inside another framework
+  # If so, skip it as it will be signed recursively when the parent framework is signed
+  framework_parent=$(dirname "$file")
+  if [[ "$framework_parent" == *.framework ]]; then
+    echo -e "${YELLOW}⚠️  Skipping nested framework $file (inside parent framework $framework_parent)${RESET}"
+    continue
+  fi
+  
   echo -e "${CYAN}🛠️  Signing framework: ${BOLD}$file${RESET}"
   FRAMEWORK_APP_BINARY=$($PLISTBUDDY -c "Print :CFBundleExecutable" "$file/Info.plist" | tr -d '"')
 
