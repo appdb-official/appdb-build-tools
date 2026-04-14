@@ -319,6 +319,21 @@ done
 
 echo -e "${BOLD}${MAGENTA}🏗️  Building...${RESET}"
 
+# Run Script / post-build phases often expect BUILT_PRODUCTS_DIR and WRAPPER_NAME in the
+# environment; export them before xcodebuild so inherited env matches this derived data layout.
+BUILD_SETTINGS_FOR_ENV=$(xcodebuild -scheme "$XCODE_BUILD_SCHEME" -project "$XCODE_PROJECT_FILE" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" -showBuildSettings 2>/dev/null)
+if [[ -n "$BUILD_SETTINGS_FOR_ENV" ]]; then
+  export BUILT_PRODUCTS_DIR=$(echo "$BUILD_SETTINGS_FOR_ENV" | grep "BUILT_PRODUCTS_DIR = " | head -n 1 | sed 's/.*BUILT_PRODUCTS_DIR = //' | sed 's/^ *//;s/ *$//' | tr -d '"')
+  export WRAPPER_NAME=$(echo "$BUILD_SETTINGS_FOR_ENV" | grep "WRAPPER_NAME = " | head -n 1 | sed 's/.*WRAPPER_NAME = //' | sed 's/^ *//;s/ *$//' | tr -d '"')
+fi
+if [[ -z "$BUILT_PRODUCTS_DIR" ]]; then
+  echo -e "${YELLOW}⚠️  Could not read BUILT_PRODUCTS_DIR from -showBuildSettings; using fallback${RESET}" >&2
+  export BUILT_PRODUCTS_DIR="$BUILD_ROOT_PATH/derivedData/Build/Products/${XCODE_BUILD_CONFIGURATION}-iphoneos"
+fi
+if [[ -z "$WRAPPER_NAME" ]]; then
+  echo -e "${YELLOW}⚠️  Could not read WRAPPER_NAME from -showBuildSettings; will detect .app after build${RESET}" >&2
+fi
+
 rm -Rf "$BUILD_ROOT_PATH/derivedData"
 
 xcodebuild -scheme "$XCODE_BUILD_SCHEME" -project "$XCODE_PROJECT_FILE" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" build CODE_SIGN_IDENTITY='' CODE_SIGNING_REQUIRED=NO CODE_SIGN_ENTITLEMENTS='' CODE_SIGNING_ALLOWED=NO
@@ -332,11 +347,16 @@ fi
 
 echo -e "${BOLD}${CYAN}🔐 Signing and packaging file${RESET}"
 
-APP_NAME=$(ls "$BUILD_ROOT_PATH/derivedData/Build/Products/Debug-iphoneos" | grep "\.app$")
+if [[ -n "$BUILT_PRODUCTS_DIR" && -n "$WRAPPER_NAME" ]]; then
+  APP_NAME="$WRAPPER_NAME"
+  APP_PATH="$BUILT_PRODUCTS_DIR/$WRAPPER_NAME"
+else
+  PRODUCTS_DIR="$BUILD_ROOT_PATH/derivedData/Build/Products/${XCODE_BUILD_CONFIGURATION}-iphoneos"
+  APP_NAME=$(ls "$PRODUCTS_DIR" | grep "\.app$" | head -n 1)
+  APP_PATH="$PRODUCTS_DIR/$APP_NAME"
+fi
 
 echo -e "${BLUE}📱 Got app name: ${BOLD}$APP_NAME${RESET}"
-
-APP_PATH="$BUILD_ROOT_PATH/derivedData/Build/Products/Debug-iphoneos/$APP_NAME"
 
 if [ ! -e "$APP_PATH/Info.plist" ]; then
   echo -e "${RED}❌ Expected file does not exist: '$APP_PATH/Info.plist'${RESET}" >&2
