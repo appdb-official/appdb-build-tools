@@ -106,19 +106,26 @@ if ! [ -f "/usr/bin/xcodebuild" ]; then
   exit 1
 fi
 
-if [[ "$1" != *\.xcodeproj && "$1" != *\.xcodeworkspace ]]; then
-  echo -e "${RED}❌ ERROR: Specify path to .xcodeproj or .xcodeworkspace file in argv[1]${RESET}" >&2
+if [[ "$1" != *\.xcodeproj && "$1" != *\.xcworkspace ]]; then
+  echo -e "${RED}❌ ERROR: Specify path to .xcodeproj or .xcworkspace file in argv[1]${RESET}" >&2
   exit 1
 fi
 
 XCODE_PROJECT_FILE=$1
-BUILD_ROOT_PATH=$(dirname $1)
+BUILD_ROOT_PATH=$(dirname "$1")
 XCODE_BUILD_SCHEME=$2
+
+# xcodebuild requires -workspace for .xcworkspace and -project for .xcodeproj (scheme builds the app product, not raw targets).
+if [[ "$XCODE_PROJECT_FILE" == *.xcworkspace ]]; then
+  XCODE_CONTAINER_ARGS=(-workspace "$XCODE_PROJECT_FILE")
+else
+  XCODE_CONTAINER_ARGS=(-project "$XCODE_PROJECT_FILE")
+fi
 
 echo -e "${BOLD}${YELLOW}📋 Getting schemes and configurations from project${RESET}"
 
 # Get project info and parse it
-PROJECT_INFO=$(xcodebuild -project "$XCODE_PROJECT_FILE" -list)
+PROJECT_INFO=$(xcodebuild "${XCODE_CONTAINER_ARGS[@]}" -list)
 echo -e "${BLUE}$PROJECT_INFO${RESET}"
 
 # Extract schemes
@@ -141,25 +148,33 @@ get_bundle_identifier_from_project() {
   
   echo -e "${CYAN}🔧 Extracting build settings from project...${RESET}" >&2
   
-  if [[ "$project_file" == *.xcodeworkspace ]]; then
+  if [[ "$project_file" == *.xcworkspace ]]; then
     build_settings=$(xcodebuild -workspace "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
   else
     build_settings=$(xcodebuild -project "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
   fi
   
   if [[ $? -eq 0 && -n "$build_settings" ]]; then
-    # Extract PRODUCT_BUNDLE_IDENTIFIER from build settings
-    bundle_id=$(echo "$build_settings" | grep "PRODUCT_BUNDLE_IDENTIFIER" | head -n 1 | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | tr -d ' ')
-    
-    # Clean up the bundle identifier (remove quotes if present)
-    bundle_id=$(echo "$bundle_id" | tr -d '"' | tr -d "'")
+    # Only match the real key at line start (not DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER = NO, etc.)
+    # Lines look like: "  PRODUCT_BUNDLE_IDENTIFIER = com.foo" or "  \"PRODUCT_BUNDLE_IDENTIFIER[sdk=...]\" = com.foo"
+    while IFS= read -r _pbi_line; do
+      # Strip key through first "= " to get value (avoids false substring matches on the key name)
+      local _val
+      _val=${_pbi_line#*= }
+      _val=$(echo "$_val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr -d '"' | tr -d "'")
+      if [[ -z "$_val" || "$_val" == "NO" || "$_val" == "YES" || "$_val" == '$(inherited)' ]]; then
+        continue
+      fi
+      bundle_id="$_val"
+      break
+    done < <(echo "$build_settings" | grep -E '^[[:space:]]*(")?PRODUCT_BUNDLE_IDENTIFIER')
   fi
-  
+
   # If we couldn't get it from build settings, try direct project file parsing
   if [[ -z "$bundle_id" ]]; then
     echo -e "${CYAN}🔧 Trying to extract from project file directly...${RESET}" >&2
     
-    if [[ "$project_file" == *.xcodeworkspace ]]; then
+    if [[ "$project_file" == *.xcworkspace ]]; then
       # For workspace, look for .xcodeproj files in the same directory
       local workspace_dir=$(dirname "$project_file")
       local xcodeproj_file=$(find "$workspace_dir" -name "*.xcodeproj" | head -n 1)
@@ -167,13 +182,25 @@ get_bundle_identifier_from_project() {
       if [[ -n "$xcodeproj_file" ]]; then
         local pbxproj_file="$xcodeproj_file/project.pbxproj"
         if [[ -f "$pbxproj_file" ]]; then
-          bundle_id=$(grep -m1 "PRODUCT_BUNDLE_IDENTIFIER" "$pbxproj_file" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | sed 's/;//' | tr -d ' "')
+          while IFS= read -r _pbx_line; do
+            _val=$(echo "$_pbx_line" | sed 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=[[:space:]]*//' | sed 's/;$//' | tr -d '"' | tr -d "'")
+            if [[ -n "$_val" && "$_val" != "NO" && "$_val" != "YES" ]]; then
+              bundle_id="$_val"
+              break
+            fi
+          done < <(grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' "$pbxproj_file")
         fi
       fi
     else
       local pbxproj_file="$project_file/project.pbxproj"
       if [[ -f "$pbxproj_file" ]]; then
-        bundle_id=$(grep -m1 "PRODUCT_BUNDLE_IDENTIFIER" "$pbxproj_file" | sed 's/.*PRODUCT_BUNDLE_IDENTIFIER = //' | sed 's/;//' | tr -d ' "')
+        while IFS= read -r _pbx_line; do
+          _val=$(echo "$_pbx_line" | sed 's/^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=[[:space:]]*//' | sed 's/;$//' | tr -d '"' | tr -d "'")
+          if [[ -n "$_val" && "$_val" != "NO" && "$_val" != "YES" ]]; then
+            bundle_id="$_val"
+            break
+          fi
+        done < <(grep -E '^[[:space:]]*PRODUCT_BUNDLE_IDENTIFIER[[:space:]]*=' "$pbxproj_file")
       fi
     fi
   fi
@@ -196,7 +223,7 @@ get_bundle_version_from_project() {
   
   echo -e "${CYAN}🔧 Extracting version info from project...${RESET}" >&2
   
-  if [[ "$project_file" == *.xcodeworkspace ]]; then
+  if [[ "$project_file" == *.xcworkspace ]]; then
     build_settings=$(xcodebuild -workspace "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
   else
     build_settings=$(xcodebuild -project "$project_file" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null)
@@ -214,7 +241,7 @@ get_bundle_version_from_project() {
   if [[ -z "$marketing_version" || -z "$current_project_version" ]]; then
     echo -e "${CYAN}🔧 Trying to extract version info from project file directly...${RESET}" >&2
     
-    if [[ "$project_file" == *.xcodeworkspace ]]; then
+    if [[ "$project_file" == *.xcworkspace ]]; then
       # For workspace, look for .xcodeproj files in the same directory
       local workspace_dir=$(dirname "$project_file")
       local xcodeproj_file=$(find "$workspace_dir" -name "*.xcodeproj" | head -n 1)
@@ -247,12 +274,158 @@ get_bundle_version_from_project() {
   echo "${marketing_version}|${current_project_version}"
 }
 
+# Primary target (PBX native target name) for a scheme — used for dependency display and signing order.
+get_primary_target_name_for_scheme() {
+  local scheme="$1"
+  local configuration="${2:-Debug}"
+  local out
+  out=$(xcodebuild "${XCODE_CONTAINER_ARGS[@]}" -scheme "$scheme" -configuration "$configuration" -showBuildSettings 2>/dev/null | grep "TARGET_NAME = " | head -n 1 | sed 's/.*TARGET_NAME = //' | sed 's/^ *//;s/ *$//' | tr -d '"' | tr -d "'")
+  echo "$out"
+}
+
+# First project.pbxproj under the project tree whose PBXNativeTarget block matches /* target */.
+find_pbxproj_for_native_target() {
+  local target_name="$1"
+  local pbx
+  while IFS= read -r -d '' pbx; do
+    if grep -q "/\* ${target_name} \*/ = {" "$pbx" 2>/dev/null && grep -q "isa = PBXNativeTarget;" "$pbx" 2>/dev/null; then
+      echo "$pbx"
+      return 0
+    fi
+  done < <(find "$BUILD_ROOT_PATH" -name project.pbxproj -print0 2>/dev/null)
+  return 1
+}
+
+# Print space-separated PBX target dependency names in dependency-first order (leaves before roots),
+# then the primary target last. Parsed from project.pbxproj (PBXTargetDependency / PBXNativeTarget).
+pbx_target_build_plan() {
+  local pbxproj="$1"
+  local primary_target="$2"
+  python3 -c "
+import re, sys
+path, primary = sys.argv[1], sys.argv[2]
+text = open(path, encoding='utf-8', errors='ignore').read()
+
+def direct_deps(t):
+    m = re.search(
+        r'/\* %s \*/ = \{\s*isa = PBXNativeTarget;\s*([\s\S]*?)\n\t\t\};' % re.escape(t),
+        text,
+    )
+    if not m:
+        return []
+    inner = m.group(1)
+    dm = re.search(r'dependencies = \(\s*\n([\s\S]*?)\n\s*\);', inner)
+    if not dm:
+        return []
+    uuids = re.findall(r'([0-9A-F]{24})\s*/\* PBXTargetDependency', dm.group(1))
+    out = []
+    for u in uuids:
+        mm = re.search(
+            r'%s /\* PBXTargetDependency \*/ = \{\s*isa = PBXTargetDependency;\s*name = ([^;]+);' % u,
+            text,
+        )
+        if mm:
+            out.append(mm.group(1).strip())
+    return out
+
+def deps_first(t, seen):
+    order = []
+    if t in seen:
+        return order
+    seen.add(t)
+    for d in direct_deps(t):
+        order.extend(deps_first(d, seen))
+        order.append(d)
+    return order
+
+seen = set()
+chain = deps_first(primary, seen)
+# full build order: dependencies bottom-up, then primary app/framework target
+print(' '.join(chain + [primary]))
+" "$pbxproj" "$primary_target" 2>/dev/null
+}
+
+# Space-separated PBX dependency target names only (no primary), dependency-first — for messaging.
+pbx_target_deps_only() {
+  local pbxproj="$1"
+  local primary_target="$2"
+  python3 -c "
+import re, sys
+path, primary = sys.argv[1], sys.argv[2]
+text = open(path, encoding='utf-8', errors='ignore').read()
+
+def direct_deps(t):
+    m = re.search(
+        r'/\* %s \*/ = \{\s*isa = PBXNativeTarget;\s*([\s\S]*?)\n\t\t\};' % re.escape(t),
+        text,
+    )
+    if not m:
+        return []
+    inner = m.group(1)
+    dm = re.search(r'dependencies = \(\s*\n([\s\S]*?)\n\s*\);', inner)
+    if not dm:
+        return []
+    chunk = dm.group(1)
+    uuids = re.findall(r'([0-9A-F]{24})\s*/\* PBXTargetDependency', chunk)
+    out = []
+    for u in uuids:
+        mm = re.search(
+            r'%s /\* PBXTargetDependency \*/ = \{\s*isa = PBXTargetDependency;\s*name = ([^;]+);' % u,
+            text,
+        )
+        if mm:
+            out.append(mm.group(1).strip())
+    return out
+
+def deps_first(t, seen):
+    order = []
+    if t in seen:
+        return order
+    seen.add(t)
+    for d in direct_deps(t):
+        order.extend(deps_first(d, seen))
+        order.append(d)
+    return order
+
+seen = set()
+print(' '.join(deps_first(primary, seen)))
+" "$pbxproj" "$primary_target" 2>/dev/null
+}
+
+print_scheme_dependency_overview() {
+  local sch pt pbx plan
+  echo -e "${BOLD}${CYAN}📎 Schemes: primary target & dependency build order (from PBX)${RESET}"
+  for sch in "${SCHEMES[@]}"; do
+    pt=$(get_primary_target_name_for_scheme "$sch")
+    if [[ -z "$pt" ]]; then
+      echo -e "  ${BOLD}$sch${RESET} → ${YELLOW}(could not read TARGET_NAME)${RESET}"
+      continue
+    fi
+    pbx=""
+    pbx=$(find_pbxproj_for_native_target "$pt" || true)
+    if [[ -z "$pbx" ]]; then
+      echo -e "  ${BOLD}$sch${RESET} → target ${GREEN}$pt${RESET} ${YELLOW}(no matching project.pbxproj)${RESET}"
+      continue
+    fi
+    deps_only=$(pbx_target_deps_only "$pbx" "$pt")
+    plan=$(pbx_target_build_plan "$pbx" "$pt")
+    if [[ -z "$deps_only" ]]; then
+      echo -e "  ${BOLD}$sch${RESET} → ${GREEN}$pt${RESET} — ${YELLOW}no PBX target dependencies${RESET}"
+    else
+      echo -e "  ${BOLD}$sch${RESET} → ${GREEN}$pt${RESET} — ${CYAN}deps:${RESET} ${deps_only// / → } ${CYAN}→ then${RESET} ${GREEN}$pt${RESET} ${CYAN}(${plan// / → })${RESET}"
+    fi
+  done
+  echo ""
+}
+
 # Select scheme if not provided as argument
 if [[ "$XCODE_BUILD_SCHEME" == "" ]]; then
   if [ ${#SCHEMES[@]} -eq 0 ]; then
     echo -e "${RED}❌ ERROR: No schemes found in project${RESET}" >&2
     exit 1
   fi
+
+  print_scheme_dependency_overview
   
   XCODE_BUILD_SCHEME=$(select_from_list "🎯 Choose a build scheme:" "${SCHEMES[@]}")
   
@@ -277,6 +450,20 @@ fi
 
 echo -e "${GREEN}✅ Selected build scheme: ${BOLD}$XCODE_BUILD_SCHEME${RESET}"
 echo -e "${GREEN}✅ Selected build configuration: ${BOLD}$XCODE_BUILD_CONFIGURATION${RESET}"
+
+SCHEME_PRIMARY_TARGET=$(get_primary_target_name_for_scheme "$XCODE_BUILD_SCHEME" "$XCODE_BUILD_CONFIGURATION")
+SCHEME_PBXPROJ=$(find_pbxproj_for_native_target "$SCHEME_PRIMARY_TARGET" || true)
+SCHEME_BUILD_PLAN=""
+SCHEME_DEPS_ONLY=""
+if [[ -n "$SCHEME_PRIMARY_TARGET" && -n "$SCHEME_PBXPROJ" ]]; then
+  SCHEME_BUILD_PLAN=$(pbx_target_build_plan "$SCHEME_PBXPROJ" "$SCHEME_PRIMARY_TARGET")
+  SCHEME_DEPS_ONLY=$(pbx_target_deps_only "$SCHEME_PBXPROJ" "$SCHEME_PRIMARY_TARGET")
+fi
+if [[ -n "$SCHEME_DEPS_ONLY" ]]; then
+  echo -e "${BOLD}${CYAN}📎 PBX targets (sign / entitlements: dependencies first):${RESET} ${CYAN}${SCHEME_DEPS_ONLY// / → } → ${GREEN}$SCHEME_PRIMARY_TARGET${RESET}"
+else
+  echo -e "${BOLD}${CYAN}📎 PBX targets:${RESET} ${GREEN}${SCHEME_PRIMARY_TARGET:-?}${RESET} ${CYAN}(no PBX target dependencies)${RESET}"
+fi
 
 echo -e "${BOLD}${YELLOW}🔍 Getting bundle identifier from project settings${RESET}"
 CURRENT_BUNDLE_IDENTIFIER=$(get_bundle_identifier_from_project "$XCODE_PROJECT_FILE" "$XCODE_BUILD_SCHEME" "$XCODE_BUILD_CONFIGURATION")
@@ -321,7 +508,7 @@ echo -e "${BOLD}${MAGENTA}🏗️  Building...${RESET}"
 
 # Run Script / post-build phases often expect BUILT_PRODUCTS_DIR and WRAPPER_NAME in the
 # environment; export them before xcodebuild so inherited env matches this derived data layout.
-BUILD_SETTINGS_FOR_ENV=$(xcodebuild -scheme "$XCODE_BUILD_SCHEME" -project "$XCODE_PROJECT_FILE" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" -showBuildSettings 2>/dev/null)
+BUILD_SETTINGS_FOR_ENV=$(xcodebuild "${XCODE_CONTAINER_ARGS[@]}" -scheme "$XCODE_BUILD_SCHEME" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" -showBuildSettings 2>/dev/null)
 if [[ -n "$BUILD_SETTINGS_FOR_ENV" ]]; then
   export BUILT_PRODUCTS_DIR=$(echo "$BUILD_SETTINGS_FOR_ENV" | grep "BUILT_PRODUCTS_DIR = " | head -n 1 | sed 's/.*BUILT_PRODUCTS_DIR = //' | sed 's/^ *//;s/ *$//' | tr -d '"')
   export WRAPPER_NAME=$(echo "$BUILD_SETTINGS_FOR_ENV" | grep "WRAPPER_NAME = " | head -n 1 | sed 's/.*WRAPPER_NAME = //' | sed 's/^ *//;s/ *$//' | tr -d '"')
@@ -336,7 +523,7 @@ fi
 
 rm -Rf "$BUILD_ROOT_PATH/derivedData"
 
-xcodebuild -scheme "$XCODE_BUILD_SCHEME" -project "$XCODE_PROJECT_FILE" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" build CODE_SIGN_IDENTITY='' CODE_SIGNING_REQUIRED=NO CODE_SIGN_ENTITLEMENTS='' CODE_SIGNING_ALLOWED=NO
+xcodebuild "${XCODE_CONTAINER_ARGS[@]}" -scheme "$XCODE_BUILD_SCHEME" -configuration "$XCODE_BUILD_CONFIGURATION" -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT_PATH/derivedData" build CODE_SIGN_IDENTITY='' CODE_SIGNING_REQUIRED=NO CODE_SIGN_ENTITLEMENTS='' CODE_SIGNING_ALLOWED=NO
 
 if [ $? -eq 0 ]; then
   echo -e "${BOLD}${GREEN}🎉 Build OK!${RESET}"
@@ -460,10 +647,37 @@ $PLISTBUDDY -c "Add :application-identifier string APPDBAPPDB.$CURRENT_BUNDLE_ID
 
 echo -e "${BOLD}${MAGENTA}🔏 Signing...${RESET}"
 
+merge_entitlements_for_child_bundle() {
+  local template_path="${1:-}"
+  local bundle_id="$2"
+  local out_plist="$3"
+  if [[ -n "$template_path" && -f "$template_path" ]]; then
+    cp "$template_path" "$out_plist"
+  else
+    echo '<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict/></plist>' >"$out_plist"
+  fi
+  $PLISTBUDDY -c "Add :com.apple.developer.team-identifier string APPDBAPPDB" "$out_plist" 2>/dev/null || $PLISTBUDDY -c "Set :com.apple.developer.team-identifier string APPDBAPPDB" "$out_plist" 2>/dev/null || true
+  $PLISTBUDDY -c "Add :application-identifier string APPDBAPPDB.$bundle_id" "$out_plist" 2>/dev/null || $PLISTBUDDY -c "Set :application-identifier string APPDBAPPDB.$bundle_id" "$out_plist" 2>/dev/null || true
+}
+
+find_entitlements_for_target_name() {
+  local name="$1"
+  find "$BUILD_ROOT_PATH" -name "${name}.entitlements" 2>/dev/null | head -n 1
+}
+
+path_in_list() {
+  local needle="$1"
+  shift
+  local x
+  for x in "$@"; do
+    [[ "$x" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
 FRAMEWORKS_AND_DYLIBS=()
 while IFS= read -r -d $'\0'; do
   FRAMEWORKS_AND_DYLIBS+=("$REPLY")
-  #echo $REPLY
 done < <(find "$APP_PATH" -name "*.dylib" -print0)
 
 for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
@@ -472,40 +686,73 @@ for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
   echo -e "${CYAN}✍️  Signing dylib: ${BOLD}$file${RESET}"
 
   if [[ $USE_HSM == 1 ]]; then
-
     $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
   else
     $LDID -w -K"$P12" -S -M "$file"
   fi
 done
 
-FRAMEWORKS_AND_DYLIBS=()
+ORDERED_FRAMEWORK_PATHS=()
+if [[ -n "$SCHEME_BUILD_PLAN" ]]; then
+  read -ra PLAN_TOKENS <<< "$SCHEME_BUILD_PLAN"
+  for t in "${PLAN_TOKENS[@]}"; do
+    cand="$APP_PATH/Frameworks/${t}.framework"
+    if [[ -d "$cand" ]] && ! path_in_list "$cand" "${ORDERED_FRAMEWORK_PATHS[@]}"; then
+      ORDERED_FRAMEWORK_PATHS+=("$cand")
+    fi
+  done
+fi
 while IFS= read -r -d $'\0'; do
-  FRAMEWORKS_AND_DYLIBS+=("$REPLY")
-  #echo $REPLY
+  fw="$REPLY"
+  fp=$(dirname "$fw")
+  if [[ "$fp" == *.framework ]]; then
+    continue
+  fi
+  if path_in_list "$fw" "${ORDERED_FRAMEWORK_PATHS[@]}"; then
+    continue
+  fi
+  ORDERED_FRAMEWORK_PATHS+=("$fw")
 done < <(find "$APP_PATH" -name "*.framework" -print0)
 
-for file in "${FRAMEWORKS_AND_DYLIBS[@]}"; do
-  # Check if this framework is nested inside another framework
-  # If so, skip it as it will be signed recursively when the parent framework is signed
+for file in "${ORDERED_FRAMEWORK_PATHS[@]}"; do
   framework_parent=$(dirname "$file")
   if [[ "$framework_parent" == *.framework ]]; then
     echo -e "${YELLOW}⚠️  Skipping nested framework $file (inside parent framework $framework_parent)${RESET}"
     continue
   fi
-  
+
   echo -e "${CYAN}🛠️  Signing framework: ${BOLD}$file${RESET}"
   FRAMEWORK_APP_BINARY=$($PLISTBUDDY -c "Print :CFBundleExecutable" "$file/Info.plist" | tr -d '"')
+  fw_base=$(basename "$file" .framework)
+  FW_BUNDLE_ID=$($PLISTBUDDY -c "Print :CFBundleIdentifier" "$file/Info.plist" 2>/dev/null | tr -d '"' || echo "")
+  if [[ -z "$FW_BUNDLE_ID" ]]; then
+    FW_BUNDLE_ID="$fw_base"
+  fi
+
+  ENT_SRC=$(find_entitlements_for_target_name "$fw_base")
+  CHILD_ENTS_PLIST=""
+  if [[ -n "$ENT_SRC" && -f "$ENT_SRC" ]]; then
+    CHILD_ENTS_PLIST="$BUILD_ROOT_PATH/childEntitlements.$fw_base.plist"
+    merge_entitlements_for_child_bundle "$ENT_SRC" "$FW_BUNDLE_ID" "$CHILD_ENTS_PLIST"
+    echo -e "${CYAN}📜 Entitlements for ${fw_base}.framework (dependency order): ${BOLD}$ENT_SRC${RESET}"
+  fi
 
   echo -e "${CYAN}🔧 Removing entitlements from binary${RESET}"
   $LDID -S "$file/$FRAMEWORK_APP_BINARY"
-  echo -e "${CYAN}✍️  Signing${RESET}"
+  echo -e "${CYAN}✍️  Signing framework bundle${RESET}"
 
   if [[ $USE_HSM == 1 ]]; then
-
-    $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
+    if [[ -n "$CHILD_ENTS_PLIST" ]]; then
+      $LDID -w -S"$CHILD_ENTS_PLIST" -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
+    else
+      $LDID -w -S -K"$HSM_KEY_URI;pin-value=$HSM_PASSWORD" -X"$HSM_CERT_URI;pin-value=$HSM_PASSWORD" -XAppleWWDRCAG3.cer -XAppleIncRootCertificate.cer -M "$file"
+    fi
   else
-    $LDID -w -K"$P12" -S -M "$file"
+    if [[ -n "$CHILD_ENTS_PLIST" ]]; then
+      $LDID -w -K"$P12" -S"$CHILD_ENTS_PLIST" -M "$file"
+    else
+      $LDID -w -K"$P12" -S -M "$file"
+    fi
   fi
 done
 
@@ -577,6 +824,7 @@ cd "$BUILD_ROOT_PATH/dist"
 rm -Rf "$BUILD_ROOT_PATH/dist/ditto"
 rm -f "$BUILD_ROOT_PATH/emptyEntitlements"
 rm -f "$BUILD_ROOT_PATH/bundledEntitlements"
+rm -f "$BUILD_ROOT_PATH"/childEntitlements.*.plist 2>/dev/null || true
 
 echo -e "${BOLD}${GREEN}🎉 Packaging completed! ${CYAN}$BUILD_ROOT_PATH/dist/result.ipa${RESET}"
 

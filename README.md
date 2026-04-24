@@ -14,7 +14,7 @@ Run installer (by dropping it on your terminal) and follow instructions
 ## Building of an IPA
 
 1. Open Terminal, drag & drop build.sh
-2. Drag & drop your .xcodeproject or .xcodeworkspace file
+2. Drag & drop your .xcodeproject or .xcworkspace file
 
 It should look like this (for example):
 
